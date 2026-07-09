@@ -30,7 +30,7 @@ import {
   saveProfileDescription
 } from './api'
 import type { KanbanProfile } from './types'
-import { errText } from './ui'
+import { errText, FIELD_LABEL } from './ui'
 
 const DEFAULT_SENTINEL = '__default__'
 
@@ -47,9 +47,7 @@ function ProfilePicker({
 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1">
-      <span className="text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
-        {label}
-      </span>
+      <span className={FIELD_LABEL}>{label}</span>
       <Select onValueChange={name => onSave(name === DEFAULT_SENTINEL ? '' : name)} value={value || DEFAULT_SENTINEL}>
         <SelectTrigger className="w-44">
           <SelectValue />
@@ -160,9 +158,7 @@ export function OrchestrationPanel() {
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
-          Profile descriptions
-        </span>
+        <span className={FIELD_LABEL}>Profile descriptions</span>
         <p className="text-[0.6875rem] text-(--ui-text-quaternary)">
           Descriptions guide the decomposer's routing. Auto-generate with the auxiliary model, or write your own.
         </p>

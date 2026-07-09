@@ -54,6 +54,7 @@ import {
 import {
   ago,
   Avatar,
+  Callout,
   duration,
   errText,
   isLockedTarget,
@@ -197,18 +198,11 @@ function Diagnostics({ items, onReclaim }: { items: Diagnostic[]; onReclaim: () 
         const actions = diag.actions.filter(action => action.kind === 'reclaim' || action.kind === 'cli_hint')
 
         return (
-          <div
-            className="flex flex-col gap-2 rounded-md p-2.5"
+          <Callout
             key={`${diag.kind}-${diag.last_seen_at}`}
-            style={{ backgroundColor: `color-mix(in srgb, ${tone} 7%, transparent)`, borderLeft: `2px solid ${tone}` }}
+            title={`${diag.title}${diag.count > 1 ? ` ×${diag.count}` : ''}`}
+            tone={tone}
           >
-            <div className="flex items-start gap-1.5 text-[0.75rem] font-medium" style={{ color: tone }}>
-              <Codicon className="mt-px shrink-0" name="warning" size="0.8rem" />
-              <span>
-                {diag.title}
-                {diag.count > 1 ? ` ×${diag.count}` : ''}
-              </span>
-            </div>
             <p className="whitespace-pre-wrap text-[0.71rem] leading-relaxed text-(--ui-text-secondary)">
               {diag.detail}
             </p>
@@ -227,7 +221,7 @@ function Diagnostics({ items, onReclaim }: { items: Diagnostic[]; onReclaim: () 
                 ))}
               </div>
             )}
-          </div>
+          </Callout>
         )
       })}
     </div>
@@ -652,22 +646,12 @@ export function TaskDrawer({
             </div>
 
             {task.status === 'ready' && !task.assignee && !defaultAssignee && (
-              <div
-                className="flex flex-col gap-1.5 rounded-md p-2.5"
-                style={{
-                  backgroundColor: `color-mix(in srgb, ${SEVERITY_TONE.warning} 7%, transparent)`,
-                  borderLeft: `2px solid ${SEVERITY_TONE.warning}`
-                }}
-              >
-                <div className="flex items-start gap-1.5 text-[0.75rem] font-medium" style={{ color: SEVERITY_TONE.warning }}>
-                  <Codicon className="mt-px shrink-0" name="warning" size="0.8rem" />
-                  Ready, but unassigned — this card will never run.
-                </div>
+              <Callout title="Ready, but unassigned — this card will never run." tone={SEVERITY_TONE.warning}>
                 <p className="text-[0.71rem] leading-relaxed text-(--ui-text-secondary)">
                   The dispatcher only claims Ready cards that have an assignee. Pick a profile in the Assignee field
                   above (or set a default assignee in the orchestration settings) and it runs within a minute.
                 </p>
-              </div>
+              </Callout>
             )}
 
             {task.diagnostics && task.diagnostics.length > 0 && (

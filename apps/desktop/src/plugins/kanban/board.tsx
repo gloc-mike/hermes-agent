@@ -83,6 +83,7 @@ import {
   arcState,
   Avatar,
   errText,
+  FIELD_LABEL,
   isLockedTarget,
   LOCKED_COLUMNS,
   RunClock,
@@ -515,9 +516,7 @@ const WORKSPACE_KINDS = ['scratch', 'worktree', 'dir'] as const
 function Field({ children, label }: { children: ReactNode; label: string }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
-        {label}
-      </span>
+      <span className={FIELD_LABEL}>{label}</span>
       {children}
     </label>
   )

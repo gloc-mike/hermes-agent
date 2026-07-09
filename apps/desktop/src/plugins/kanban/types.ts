@@ -91,14 +91,13 @@ export interface KanbanAttachment {
   size?: null | number
 }
 
-/** Fields present only on the detail endpoint (beyond the card's KanbanTask). */
+/** Fields present only on the detail endpoint (beyond the card's KanbanTask).
+ *  `started_at`/`worker_pid`/`last_heartbeat_at` are inherited — they live on
+ *  KanbanTask now that the board's liveness arc reads them. */
 export interface KanbanTaskFull extends KanbanTask {
   result?: null | string
   created_by?: null | string
-  started_at?: null | number
   completed_at?: null | number
-  worker_pid?: null | number
-  last_heartbeat_at?: null | number
   last_failure_error?: null | string
   workspace_kind?: null | string
   workspace_path?: null | string
