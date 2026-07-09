@@ -12,7 +12,9 @@ export interface SlotProps {
 export function Slot({ area }: SlotProps) {
   const items = useContributions(area)
 
-  if (items.length === 0) {return null}
+  if (items.length === 0) {
+    return null
+  }
 
   return (
     <>

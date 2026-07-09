@@ -146,7 +146,7 @@ export function contributedKeybinds(): KeybindContribution[] {
   return registry
     .getArea(KEYBINDS_AREA)
     .map(c => c.data as KeybindContribution)
-    .filter(k => Boolean(k?.id && k.label && k.run) && !ACTION_BY_ID.has(k.id))
+    .filter(k => Boolean(k?.id && k.label) && typeof k?.run === 'function' && !ACTION_BY_ID.has(k.id))
 }
 
 /** Built-ins + contributed, one metadata list (panel, bindings, conflicts). */

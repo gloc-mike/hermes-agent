@@ -24,6 +24,7 @@ import {
   $capture,
   $keybindPanelOpen,
   beginCapture,
+  bindingsFor,
   closeKeybindPanel,
   conflictsFor,
   endCapture,
@@ -144,7 +145,10 @@ function KeybindRow({ action }: { action: KeybindActionMeta }) {
   const bindings = useStore($bindings)
   const capture = useStore($capture)
 
-  const combos = bindings[action.id] ?? [...action.defaults]
+  // bindingsFor resolves stored overrides for late-registered (contributed)
+  // actions too — $bindings only carries built-ins, so a raw lookup would show
+  // the default instead of the user's rebinding for a plugin/contrib action.
+  const combos = bindingsFor(action.id, bindings)
   const capturing = capture === action.id
   const label = k.actions[action.id] ?? action.label ?? action.id
   const isDefault = arraysEqual(combos, [...action.defaults])
