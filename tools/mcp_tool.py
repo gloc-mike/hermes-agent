@@ -2952,12 +2952,9 @@ class MCPServerTask:
                             self._ready.set()
                             self._deregister_tools()
                             self._reconnect_event.clear()
-                            try:
-                                parked = await self._wait_for_reconnect_or_shutdown(
-                                    timeout=_PARKED_RETRY_INTERVAL
-                                )
-                            except (GeneratorExit, RuntimeError):
-                                parked = "shutdown"  # ponytail: loop closed, GeneratorExit or RuntimeError on await
+                            parked = await self._wait_for_reconnect_or_shutdown(
+                                timeout=_PARKED_RETRY_INTERVAL
+                            )
                             if parked == "shutdown":
                                 return
                             logger.info(
@@ -3018,12 +3015,9 @@ class MCPServerTask:
                         # manual /mcp refresh) still wakes us immediately.
                         self._deregister_tools()
                         self._reconnect_event.clear()
-                        try:
-                            parked = await self._wait_for_reconnect_or_shutdown(
-                                timeout=_PARKED_RETRY_INTERVAL
-                            )
-                        except (GeneratorExit, RuntimeError):
-                            parked = "shutdown"
+                        parked = await self._wait_for_reconnect_or_shutdown(
+                            timeout=_PARKED_RETRY_INTERVAL
+                        )
                         if parked == "shutdown":
                             return
                         logger.info(
@@ -3054,8 +3048,10 @@ class MCPServerTask:
                 finally:
                     self.session = None
 
-        except (GeneratorExit, RuntimeError):
-            return  # ponytail: interpreter shutdown, event loop already closing
+        except BaseException as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            return  # ponytail: interpreter shutdown, event loop closing
 
     async def start(self, config: dict):
         """Create the background Task and wait until ready (or failed)."""
