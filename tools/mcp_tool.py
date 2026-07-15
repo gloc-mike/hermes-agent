@@ -2780,175 +2780,242 @@ class MCPServerTask:
         Includes automatic reconnection with exponential backoff if the
         connection drops unexpectedly (unless shutdown was requested).
         """
-        self._config = config
-        self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
-        self._auth_type = (config.get("auth") or "").lower().strip()
-        self._idle_timeout_seconds = _get_lifecycle_seconds(config, "idle_timeout_seconds")
-        self._max_lifetime_seconds = _get_lifecycle_seconds(config, "max_lifetime_seconds")
-
-        # Set up sampling handler if enabled and SDK types are available
-        sampling_config = config.get("sampling", {})
-        if sampling_config.get("enabled", True) and _MCP_SAMPLING_TYPES:
-            self._sampling = SamplingHandler(self.name, sampling_config)
-        else:
-            self._sampling = None
-
-        # Set up elicitation handler if enabled and SDK types are available.
-        # Servers use elicitation/create to ask the client for structured
-        # input mid-tool-call (e.g. payment authorization). The handler
-        # routes those requests through Hermes' approval system.
-        elicitation_config = config.get("elicitation", {})
-        if elicitation_config.get("enabled", True) and _MCP_ELICITATION_TYPES:
-            self._elicitation = ElicitationHandler(self.name, elicitation_config, owner=self)
-        else:
-            self._elicitation = None
-
-        # Validate: warn if both url and command are present
-        if "url" in config and "command" in config:
-            logger.warning(
-                "MCP server '%s' has both 'url' and 'command' in config. "
-                "Using HTTP transport ('url'). Remove 'command' to silence "
-                "this warning.",
-                self.name,
-            )
-
-        # Validate remote URL once, up front.  Raising here (rather than
-        # letting it blow up inside the SDK's httpx layer on every retry)
-        # means a typo in config.yaml fails fast with a clear error — and
-        # critically, no reconnect-backoff burn.  (Ported from
-        # anomalyco/opencode#25019.)
-        if self._is_http():
-            try:
-                _validate_remote_mcp_url(self.name, config.get("url"))
-            except InvalidMcpUrlError as exc:
-                logger.warning("%s", exc)
-                self._error = exc
-                self._ready.set()
-                return
-
-            # Pre-flight content-type probe (Streamable HTTP only; SSE is
-            # exercised by its own client and legitimately serves
-            # text/event-stream). A URL pointed at a web-app root returns
-            # HTML, which makes the SDK hang for the full connect_timeout
-            # before surfacing an opaque CancelledError. Probing here — once,
-            # outside the SDK task group — fails fast and non-retryably with
-            # an actionable message, mirroring the URL-validation path above.
-            # Skip the probe when _ready is already set (reconnect after a
-            # prior successful connect) — the endpoint was validated once,
-            # re-probing is a redundant round-trip. Also skip for OAuth servers:
-            # without a cached token the endpoint returns HTML or 401, which
-            # would incorrectly block the OAuth flow before it can run.
-            if config.get("transport") != "sse" and not config.get("skip_preflight") and not self._ready.is_set() and self._auth_type != "oauth":
+        try:
+            self._config = config
+            self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
+            self._auth_type = (config.get("auth") or "").lower().strip()
+            self._idle_timeout_seconds = _get_lifecycle_seconds(config, "idle_timeout_seconds")
+            self._max_lifetime_seconds = _get_lifecycle_seconds(config, "max_lifetime_seconds")
+    
+            # Set up sampling handler if enabled and SDK types are available
+            sampling_config = config.get("sampling", {})
+            if sampling_config.get("enabled", True) and _MCP_SAMPLING_TYPES:
+                self._sampling = SamplingHandler(self.name, sampling_config)
+            else:
+                self._sampling = None
+    
+            # Set up elicitation handler if enabled and SDK types are available.
+            # Servers use elicitation/create to ask the client for structured
+            # input mid-tool-call (e.g. payment authorization). The handler
+            # routes those requests through Hermes' approval system.
+            elicitation_config = config.get("elicitation", {})
+            if elicitation_config.get("enabled", True) and _MCP_ELICITATION_TYPES:
+                self._elicitation = ElicitationHandler(self.name, elicitation_config, owner=self)
+            else:
+                self._elicitation = None
+    
+            # Validate: warn if both url and command are present
+            if "url" in config and "command" in config:
+                logger.warning(
+                    "MCP server '%s' has both 'url' and 'command' in config. "
+                    "Using HTTP transport ('url'). Remove 'command' to silence "
+                    "this warning.",
+                    self.name,
+                )
+    
+            # Validate remote URL once, up front.  Raising here (rather than
+            # letting it blow up inside the SDK's httpx layer on every retry)
+            # means a typo in config.yaml fails fast with a clear error — and
+            # critically, no reconnect-backoff burn.  (Ported from
+            # anomalyco/opencode#25019.)
+            if self._is_http():
                 try:
-                    _probe_headers = dict(config.get("headers") or {})
-                    await self._preflight_content_type(
-                        config["url"],
-                        headers=_probe_headers,
-                        ssl_verify=config.get("ssl_verify", True),
-                        client_cert=_resolve_client_cert(self.name, config),
-                    )
-                except NonMcpEndpointError as exc:
+                    _validate_remote_mcp_url(self.name, config.get("url"))
+                except InvalidMcpUrlError as exc:
                     logger.warning("%s", exc)
                     self._error = exc
                     self._ready.set()
                     return
-
-        self._reconnect_retries = 0
-        initial_retries = 0
-        backoff = 1.0
-
-        while True:
-            try:
-                if self._is_http():
-                    lifecycle_reason = await self._run_http(config)
-                else:
-                    lifecycle_reason = await self._run_stdio(config)
-                # Transport returned cleanly. Two cases:
-                #  - _shutdown_event was set: exit the run loop entirely.
-                #  - _reconnect_event was set (auth recovery): loop back and
-                #    rebuild the MCP session with fresh credentials. Do NOT
-                #    touch the retry counters — this is not a failure.
-                if self._shutdown_event.is_set():
-                    break
-                if lifecycle_reason == "recycle":
-                    logger.info(
-                        "MCP server '%s': stdio session recycled after %s; "
-                        "waiting for lazy reconnect",
-                        self.name, self._recycled_reason,
-                    )
-                    self.session = None
-                    await self._wait_for_lazy_reconnect()
-                    if self._shutdown_event.is_set():
-                        break
-                    self._reconnect_event.clear()
-                    continue
-                logger.info(
-                    "MCP server '%s': reconnecting (OAuth recovery or "
-                    "manual refresh)",
-                    self.name,
-                )
-                # A clean transport return only happens after a session was
-                # successfully established and then asked to rebuild (auth
-                # recovery / manual refresh / breaker-driven reconnect). That
-                # is proof the server is reachable, so clear the consecutive-
-                # failure budget — otherwise transient drops accumulated over
-                # a long-lived session would eventually exhaust it and
-                # permanently kill an otherwise-healthy server.
-                self._reconnect_retries = 0
-                backoff = 1.0
-                # Reset the session reference and readiness; _run_http/_run_stdio
-                # will repopulate both on successful re-entry.  Leaving
-                # _ready set here lets handler-side recovery mistake the stale
-                # pre-reconnect session for a fresh one and retry too early.
-                self._ready.clear()
-                self.session = None
-                continue
-            except asyncio.CancelledError:
-                # Task was cancelled (shutdown, gateway restart, explicit
-                # task.cancel()). Don't treat this as a connection failure —
-                # CancelledError inherits from BaseException (not Exception)
-                # in Python 3.11+, so the broad ``except Exception`` below
-                # would NOT catch it; we'd silently exit the reconnect loop
-                # and the MCP server would stay dead until Hermes is fully
-                # restarted. Re-raise so the task's cancellation propagates
-                # correctly to asyncio's task machinery and ``shutdown()``'s
-                # ``await self._task`` completes. See #9930.
-                self.session = None
-                raise
-            except Exception as exc:
-                self.session = None
-                if self._is_recycled_stdio():
-                    logger.warning(
-                        "MCP server '%s': lazy reconnect after stdio recycle "
-                        "failed, marking unavailable while retrying: %s",
-                        self.name, exc,
-                    )
-                    self._recycled_reason = None
-
-                # If this is the first connection attempt, retry with backoff
-                # before giving up. A transient DNS/network blip at startup
-                # should not permanently kill the server.
-                # (Ported from Kilo Code's MCP resilience fix.)
-                if not self._ready.is_set():
-                    if _is_auth_error(exc):
-                        logger.warning(
-                            "MCP server '%s' failed initial OAuth authentication, "
-                            "not retrying automatically: %s",
-                            self.name, exc,
+    
+                # Pre-flight content-type probe (Streamable HTTP only; SSE is
+                # exercised by its own client and legitimately serves
+                # text/event-stream). A URL pointed at a web-app root returns
+                # HTML, which makes the SDK hang for the full connect_timeout
+                # before surfacing an opaque CancelledError. Probing here — once,
+                # outside the SDK task group — fails fast and non-retryably with
+                # an actionable message, mirroring the URL-validation path above.
+                # Skip the probe when _ready is already set (reconnect after a
+                # prior successful connect) — the endpoint was validated once,
+                # re-probing is a redundant round-trip. Also skip for OAuth servers:
+                # without a cached token the endpoint returns HTML or 401, which
+                # would incorrectly block the OAuth flow before it can run.
+                if config.get("transport") != "sse" and not config.get("skip_preflight") and not self._ready.is_set() and self._auth_type != "oauth":
+                    try:
+                        _probe_headers = dict(config.get("headers") or {})
+                        await self._preflight_content_type(
+                            config["url"],
+                            headers=_probe_headers,
+                            ssl_verify=config.get("ssl_verify", True),
+                            client_cert=_resolve_client_cert(self.name, config),
                         )
+                    except NonMcpEndpointError as exc:
+                        logger.warning("%s", exc)
                         self._error = exc
                         self._ready.set()
                         return
-
-                    initial_retries += 1
-                    if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
-                        logger.warning(
-                            "MCP server '%s' failed initial connection after "
-                            "%d attempts, parking until a reconnect is requested: %s",
-                            self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+    
+            self._reconnect_retries = 0
+            initial_retries = 0
+            backoff = 1.0
+    
+            while True:
+                try:
+                    if self._is_http():
+                        lifecycle_reason = await self._run_http(config)
+                    else:
+                        lifecycle_reason = await self._run_stdio(config)
+                    # Transport returned cleanly. Two cases:
+                    #  - _shutdown_event was set: exit the run loop entirely.
+                    #  - _reconnect_event was set (auth recovery): loop back and
+                    #    rebuild the MCP session with fresh credentials. Do NOT
+                    #    touch the retry counters — this is not a failure.
+                    if self._shutdown_event.is_set():
+                        break
+                    if lifecycle_reason == "recycle":
+                        logger.info(
+                            "MCP server '%s': stdio session recycled after %s; "
+                            "waiting for lazy reconnect",
+                            self.name, self._recycled_reason,
                         )
-                        self._error = exc
-                        self._ready.set()
+                        self.session = None
+                        await self._wait_for_lazy_reconnect()
+                        if self._shutdown_event.is_set():
+                            break
+                        self._reconnect_event.clear()
+                        continue
+                    logger.info(
+                        "MCP server '%s': reconnecting (OAuth recovery or "
+                        "manual refresh)",
+                        self.name,
+                    )
+                    # A clean transport return only happens after a session was
+                    # successfully established and then asked to rebuild (auth
+                    # recovery / manual refresh / breaker-driven reconnect). That
+                    # is proof the server is reachable, so clear the consecutive-
+                    # failure budget — otherwise transient drops accumulated over
+                    # a long-lived session would eventually exhaust it and
+                    # permanently kill an otherwise-healthy server.
+                    self._reconnect_retries = 0
+                    backoff = 1.0
+                    # Reset the session reference and readiness; _run_http/_run_stdio
+                    # will repopulate both on successful re-entry.  Leaving
+                    # _ready set here lets handler-side recovery mistake the stale
+                    # pre-reconnect session for a fresh one and retry too early.
+                    self._ready.clear()
+                    self.session = None
+                    continue
+                except asyncio.CancelledError:
+                    # Task was cancelled (shutdown, gateway restart, explicit
+                    # task.cancel()). Don't treat this as a connection failure —
+                    # CancelledError inherits from BaseException (not Exception)
+                    # in Python 3.11+, so the broad ``except Exception`` below
+                    # would NOT catch it; we'd silently exit the reconnect loop
+                    # and the MCP server would stay dead until Hermes is fully
+                    # restarted. Re-raise so the task's cancellation propagates
+                    # correctly to asyncio's task machinery and ``shutdown()``'s
+                    # ``await self._task`` completes. See #9930.
+                    self.session = None
+                    raise
+                except Exception as exc:
+                    self.session = None
+                    if self._is_recycled_stdio():
+                        logger.warning(
+                            "MCP server '%s': lazy reconnect after stdio recycle "
+                            "failed, marking unavailable while retrying: %s",
+                            self.name, exc,
+                        )
+                        self._recycled_reason = None
+    
+                    # If this is the first connection attempt, retry with backoff
+                    # before giving up. A transient DNS/network blip at startup
+                    # should not permanently kill the server.
+                    # (Ported from Kilo Code's MCP resilience fix.)
+                    if not self._ready.is_set():
+                        if _is_auth_error(exc):
+                            logger.warning(
+                                "MCP server '%s' failed initial OAuth authentication, "
+                                "not retrying automatically: %s",
+                                self.name, exc,
+                            )
+                            self._error = exc
+                            self._ready.set()
+                            return
+    
+                        initial_retries += 1
+                        if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
+                            logger.warning(
+                                "MCP server '%s' failed initial connection after "
+                                "%d attempts, parking until a reconnect is requested: %s",
+                                self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+                            )
+                            self._error = exc
+                            self._ready.set()
+                            self._deregister_tools()
+                            self._reconnect_event.clear()
+                            try:
+                                parked = await self._wait_for_reconnect_or_shutdown(
+                                    timeout=_PARKED_RETRY_INTERVAL
+                                )
+                            except (GeneratorExit, RuntimeError):
+                                parked = "shutdown"  # ponytail: loop closed, GeneratorExit or RuntimeError on await
+                            if parked == "shutdown":
+                                return
+                            logger.info(
+                                "MCP server '%s': attempting revival after initial "
+                                "connection failures (self-probe or explicit "
+                                "reconnect request); rebuilding transport.",
+                                self.name,
+                            )
+                            initial_retries = 0
+                            self._reconnect_retries = 0
+                            backoff = 1.0
+                            self._error = None
+                            self._ready.clear()
+                            continue
+    
+                        logger.warning(
+                            "MCP server '%s' initial connection failed "
+                            "(attempt %d/%d), retrying in %.0fs: %s",
+                            self.name, initial_retries,
+                            _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
+    
+                        # Check if shutdown was requested during the sleep
+                        if self._shutdown_event.is_set():
+                            self._error = exc
+                            self._ready.set()
+                            return
+                        continue
+    
+                    # If shutdown was requested, don't reconnect
+                    if self._shutdown_event.is_set():
+                        logger.debug(
+                            "MCP server '%s' disconnected during shutdown: %s",
+                            self.name, exc,
+                        )
+                        return
+    
+                    self._reconnect_retries += 1
+                    if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
+                        logger.warning(
+                            "MCP server '%s' failed after %d reconnection attempts, "
+                            "parking; will self-probe every %ds until it recovers: %s",
+                            self.name, _MAX_RECONNECT_RETRIES,
+                            _PARKED_RETRY_INTERVAL, exc,
+                        )
+                        # Do NOT return — exiting the task orphans the server:
+                        # nothing would ever listen for _reconnect_event again
+                        # and the server would be permanently wedged for the
+                        # life of the process (#16788). Instead, drop the phantom
+                        # tools from the registry and park. Because parking
+                        # deregisters the tools, no tool call can reach the
+                        # circuit-breaker half-open probe or _signal_reconnect —
+                        # so the park is a TIMED wait: every _PARKED_RETRY_INTERVAL
+                        # we wake and attempt one reconnect ourselves (#57129).
+                        # An explicit _reconnect_event.set() (OAuth recovery,
+                        # manual /mcp refresh) still wakes us immediately.
                         self._deregister_tools()
                         self._reconnect_event.clear()
                         try:
@@ -2956,102 +3023,39 @@ class MCPServerTask:
                                 timeout=_PARKED_RETRY_INTERVAL
                             )
                         except (GeneratorExit, RuntimeError):
-                            parked = "shutdown"  # ponytail: loop closed, GeneratorExit or RuntimeError on await
+                            parked = "shutdown"
                         if parked == "shutdown":
                             return
                         logger.info(
-                            "MCP server '%s': attempting revival after initial "
-                            "connection failures (self-probe or explicit "
-                            "reconnect request); rebuilding transport.",
+                            "MCP server '%s': attempting revival from parked state "
+                            "(self-probe or explicit reconnect request); "
+                            "rebuilding transport.",
                             self.name,
                         )
-                        initial_retries = 0
-                        self._reconnect_retries = 0
+                        # One probe attempt per wake: budget of 1 so a still-dead
+                        # server parks again for another interval instead of
+                        # burning 5 rapid retries each cycle.
+                        self._reconnect_retries = _MAX_RECONNECT_RETRIES
                         backoff = 1.0
-                        self._error = None
-                        self._ready.clear()
                         continue
-
+    
                     logger.warning(
-                        "MCP server '%s' initial connection failed "
-                        "(attempt %d/%d), retrying in %.0fs: %s",
-                        self.name, initial_retries,
-                        _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
+                        "MCP server '%s' connection lost (attempt %d/%d), "
+                        "reconnecting in %.0fs: %s",
+                        self.name, self._reconnect_retries, _MAX_RECONNECT_RETRIES,
+                        backoff, exc,
                     )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
-
-                    # Check if shutdown was requested during the sleep
+    
+                    # Check again after sleeping
                     if self._shutdown_event.is_set():
-                        self._error = exc
-                        self._ready.set()
                         return
-                    continue
+                finally:
+                    self.session = None
 
-                # If shutdown was requested, don't reconnect
-                if self._shutdown_event.is_set():
-                    logger.debug(
-                        "MCP server '%s' disconnected during shutdown: %s",
-                        self.name, exc,
-                    )
-                    return
-
-                self._reconnect_retries += 1
-                if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
-                    logger.warning(
-                        "MCP server '%s' failed after %d reconnection attempts, "
-                        "parking; will self-probe every %ds until it recovers: %s",
-                        self.name, _MAX_RECONNECT_RETRIES,
-                        _PARKED_RETRY_INTERVAL, exc,
-                    )
-                    # Do NOT return — exiting the task orphans the server:
-                    # nothing would ever listen for _reconnect_event again
-                    # and the server would be permanently wedged for the
-                    # life of the process (#16788). Instead, drop the phantom
-                    # tools from the registry and park. Because parking
-                    # deregisters the tools, no tool call can reach the
-                    # circuit-breaker half-open probe or _signal_reconnect —
-                    # so the park is a TIMED wait: every _PARKED_RETRY_INTERVAL
-                    # we wake and attempt one reconnect ourselves (#57129).
-                    # An explicit _reconnect_event.set() (OAuth recovery,
-                    # manual /mcp refresh) still wakes us immediately.
-                    self._deregister_tools()
-                    self._reconnect_event.clear()
-                    try:
-                        parked = await self._wait_for_reconnect_or_shutdown(
-                            timeout=_PARKED_RETRY_INTERVAL
-                        )
-                    except (GeneratorExit, RuntimeError):
-                        parked = "shutdown"
-                    if parked == "shutdown":
-                        return
-                    logger.info(
-                        "MCP server '%s': attempting revival from parked state "
-                        "(self-probe or explicit reconnect request); "
-                        "rebuilding transport.",
-                        self.name,
-                    )
-                    # One probe attempt per wake: budget of 1 so a still-dead
-                    # server parks again for another interval instead of
-                    # burning 5 rapid retries each cycle.
-                    self._reconnect_retries = _MAX_RECONNECT_RETRIES
-                    backoff = 1.0
-                    continue
-
-                logger.warning(
-                    "MCP server '%s' connection lost (attempt %d/%d), "
-                    "reconnecting in %.0fs: %s",
-                    self.name, self._reconnect_retries, _MAX_RECONNECT_RETRIES,
-                    backoff, exc,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
-
-                # Check again after sleeping
-                if self._shutdown_event.is_set():
-                    return
-            finally:
-                self.session = None
+        except (GeneratorExit, RuntimeError):
+            return  # ponytail: interpreter shutdown, event loop already closing
 
     async def start(self, config: dict):
         """Create the background Task and wait until ready (or failed)."""
