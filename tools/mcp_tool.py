@@ -2908,6 +2908,13 @@ class MCPServerTask:
                 # ``await self._task`` completes. See #9930.
                 self.session = None
                 raise
+            except GeneratorExit:
+                # GeneratorExit is thrown into pending coroutines during
+                # interpreter shutdown.  The _wait_for_reconnect_or_shutdown
+                # await inside the Exception handler below is the most common
+                # landing site.  Silently return — there is nothing left to
+                # clean up and no task to propagate to.
+                return
             except Exception as exc:
                 self.session = None
                 if self._is_recycled_stdio():
