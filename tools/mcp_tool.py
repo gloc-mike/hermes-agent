@@ -2951,9 +2951,12 @@ class MCPServerTask:
                         self._ready.set()
                         self._deregister_tools()
                         self._reconnect_event.clear()
-                        parked = await self._wait_for_reconnect_or_shutdown(
-                            timeout=_PARKED_RETRY_INTERVAL
-                        )
+                        try:
+                            parked = await self._wait_for_reconnect_or_shutdown(
+                                timeout=_PARKED_RETRY_INTERVAL
+                            )
+                        except GeneratorExit:
+                            parked = "shutdown"  # ponytail: GeneratorExit hits await, inner catch unreached
                         if parked == "shutdown":
                             return
                         logger.info(
@@ -3014,9 +3017,12 @@ class MCPServerTask:
                     # manual /mcp refresh) still wakes us immediately.
                     self._deregister_tools()
                     self._reconnect_event.clear()
-                    parked = await self._wait_for_reconnect_or_shutdown(
-                        timeout=_PARKED_RETRY_INTERVAL
-                    )
+                    try:
+                        parked = await self._wait_for_reconnect_or_shutdown(
+                            timeout=_PARKED_RETRY_INTERVAL
+                        )
+                    except GeneratorExit:
+                        parked = "shutdown"
                     if parked == "shutdown":
                         return
                     logger.info(
