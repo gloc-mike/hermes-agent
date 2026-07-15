@@ -2149,16 +2149,23 @@ class MCPServerTask:
         """
         shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
         reconnect_task = asyncio.ensure_future(self._reconnect_event.wait())
+        shutting_down = False
         try:
-            await asyncio.wait(
-                {shutdown_task, reconnect_task},
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=timeout,
-            )
+            try:
+                await asyncio.wait(
+                    {shutdown_task, reconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=timeout,
+                )
+            except GeneratorExit:
+                shutting_down = True
+                return "shutdown"
         finally:
             for t in (shutdown_task, reconnect_task):
                 if not t.done():
                     t.cancel()
+                    if shutting_down:
+                        continue  # ponytail: event loop closing, awaiting is pointless+broken
                     try:
                         await t
                     except (asyncio.CancelledError, Exception):
