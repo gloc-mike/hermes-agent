@@ -2150,26 +2150,29 @@ class MCPServerTask:
         shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
         reconnect_task = asyncio.ensure_future(self._reconnect_event.wait())
         try:
-            await asyncio.wait(
-                {shutdown_task, reconnect_task},
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=timeout,
-            )
-        finally:
-            for t in (shutdown_task, reconnect_task):
-                if not t.done():
-                    try:
-                        t.cancel()
-                    except BaseException:
-                        pass  # ponytail: event loop closing, any exception is harmless
-                    try:
-                        await t
-                    except BaseException:
-                        pass
-        if self._shutdown_event.is_set():
-            return "shutdown"
-        self._reconnect_event.clear()
-        return "reconnect"
+            try:
+                await asyncio.wait(
+                    {shutdown_task, reconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=timeout,
+                )
+            finally:
+                for t in (shutdown_task, reconnect_task):
+                    if not t.done():
+                        try:
+                            t.cancel()
+                        except BaseException:
+                            pass  # ponytail: event loop closing
+                        try:
+                            await t
+                        except BaseException:
+                            pass
+            if self._shutdown_event.is_set():
+                return "shutdown"
+            self._reconnect_event.clear()
+            return "reconnect"
+        except GeneratorExit:
+            return "shutdown"  # ponytail: interpreter shutdown
 
     async def _run_stdio(self, config: dict):
         """Run the server using stdio transport."""
